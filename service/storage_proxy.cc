@@ -94,6 +94,7 @@ namespace service {
 static logging::logger slogger("storage_proxy");
 static logging::logger qlogger("query_result");
 static logging::logger mlogger("mutation_data");
+logging::logger cntlogger("counters");
 
 const sstring storage_proxy::COORDINATOR_STATS_CATEGORY("storage_proxy_coordinator");
 const sstring storage_proxy::REPLICA_STATS_CATEGORY("storage_proxy_replica");
@@ -1009,23 +1010,23 @@ storage_proxy::mutate_locally(std::vector<mutation> mutations, clock_type::time_
 
 future<>
 storage_proxy::mutate_counters_on_leader(std::vector<frozen_mutation_and_schema> mutations, db::consistency_level cl, clock_type::time_point timeout,
-                                         tracing::trace_state_ptr trace_state) {
+                                         tracing::trace_state_ptr trace_state, bool origin_is_mutate_counters) {
     _stats.received_counter_updates += mutations.size();
-    return do_with(std::move(mutations), [this, cl, timeout, trace_state = std::move(trace_state)] (std::vector<frozen_mutation_and_schema>& update_ms) mutable {
-        return parallel_for_each(update_ms, [this, cl, timeout, trace_state] (frozen_mutation_and_schema& fm_a_s) {
-            return mutate_counter_on_leader_and_replicate(fm_a_s.s, std::move(fm_a_s.fm), cl, timeout, trace_state);
+    return do_with(std::move(mutations), [this, cl, timeout, trace_state = std::move(trace_state), origin_is_mutate_counters] (std::vector<frozen_mutation_and_schema>& update_ms) mutable {
+        return parallel_for_each(update_ms, [this, cl, timeout, trace_state, origin_is_mutate_counters] (frozen_mutation_and_schema& fm_a_s) {
+            return mutate_counter_on_leader_and_replicate(fm_a_s.s, std::move(fm_a_s.fm), cl, timeout, trace_state, origin_is_mutate_counters);
         });
     });
 }
 
 future<>
 storage_proxy::mutate_counter_on_leader_and_replicate(const schema_ptr& s, frozen_mutation fm, db::consistency_level cl, clock_type::time_point timeout,
-                                                      tracing::trace_state_ptr trace_state) {
+                                                      tracing::trace_state_ptr trace_state, bool origin_is_mutate_counters) {
     auto shard = _db.local().shard_of(fm);
     _stats.replica_cross_shard_ops += shard != engine().cpu_id();
-    return _db.invoke_on(shard, [gs = global_schema_ptr(s), fm = std::move(fm), cl, timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state))] (database& db) {
+    return _db.invoke_on(shard, [gs = global_schema_ptr(s), fm = std::move(fm), cl, timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state)), origin_is_mutate_counters] (database& db) {
         auto trace_state = gt.get();
-        return db.apply_counter_update(gs, fm, timeout, trace_state).then([cl, timeout, trace_state] (mutation m) mutable {
+        return db.apply_counter_update(gs, fm, timeout, trace_state, origin_is_mutate_counters).then([cl, timeout, trace_state] (mutation m) mutable {
             return service::get_local_storage_proxy().replicate_counter_from_leader(std::move(m), cl, std::move(trace_state), timeout);
         });
     });
@@ -1245,12 +1246,20 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
     slogger.trace("mutate_counters cl={}", cl);
     mlogger.trace("counter mutations={}", mutations);
 
-
     // Choose a leader for each mutation
     std::unordered_map<gms::inet_address, std::vector<frozen_mutation_and_schema>> leaders;
     for (auto& m : mutations) {
+        const auto delta_m = calc_counter_mutations_delta(m);
+        auto fm = freeze(m);
+        // Test if freeze-unfreeze changed counter deltas (it should not)
+        if (m.schema()->ks_name() == "sync" && m.schema()->cf_name() == "user_quota") {
+            const auto delta_fm = calc_counter_mutations_delta(fm.unfreeze(m.schema()));
+            if (delta_m != delta_fm || llabs(delta_m) > 1 || llabs(delta_fm) > 1) {
+                cntlogger.error("mutate_counters: delta_m={}; delta_fm={}", delta_m, delta_fm);
+            }
+        }
         auto leader = find_leader_for_counter_update(m, cl);
-        leaders[leader].emplace_back(frozen_mutation_and_schema { freeze(m), m.schema() });
+        leaders[leader].emplace_back(frozen_mutation_and_schema { fm, m.schema() });
         // FIXME: check if CL can be reached
     }
 
@@ -1271,12 +1280,16 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
                 return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(ks, cl), db::write_type::COUNTER));
             } catch (timed_out_error&) {
                 return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(ks, cl), db::write_type::COUNTER));
+            } catch (std::exception& e) {
+                cntlogger.info("Uncaught std::exception in mutate_counters: {}", e.what());
+                throw;
             }
         };
 
         auto f = make_ready_future<>();
         if (endpoint == my_address) {
-            f = this->mutate_counters_on_leader(std::move(endpoint_and_mutations.second), cl, timeout, tr_state);
+            f = this->mutate_counters_on_leader(std::move(endpoint_and_mutations.second), cl, timeout, tr_state,
+                    true /*origin_is_mutate_counters*/);
         } else {
             auto& mutations = endpoint_and_mutations.second;
             auto fms = boost::copy_range<std::vector<frozen_mutation>>(mutations | boost::adaptors::transformed([] (auto& m) {
@@ -3397,7 +3410,8 @@ void storage_proxy::init_messaging_service() {
                 });
             }).then([trace_state_ptr = std::move(trace_state_ptr), &mutations, cl, timeout] {
                 auto sp = get_local_shared_storage_proxy();
-                return sp->mutate_counters_on_leader(std::move(mutations), cl, timeout, std::move(trace_state_ptr));
+                return sp->mutate_counters_on_leader(std::move(mutations), cl, timeout, std::move(trace_state_ptr),
+                        false /*origin_is_mutate_counters*/);
             });
         });
     });

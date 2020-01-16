@@ -442,7 +442,7 @@ struct counter_cell_mutable_view : basic_counter_cell_view<mutable_view::yes> {
 // Transforms mutation dst from counter updates to counter shards using state
 // stored in current_state.
 // If current_state is present it has to be in the same schema as dst.
-void transform_counter_updates_to_shards(mutation& dst, const mutation* current_state, uint64_t clock_offset);
+void transform_counter_updates_to_shards(mutation& dst, const mutation* current_state, uint64_t clock_offset, bool origin_is_mutate_counters);
 
 template<>
 struct appending_hash<counter_shard_view> {

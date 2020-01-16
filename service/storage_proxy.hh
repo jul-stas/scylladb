@@ -61,6 +61,7 @@
 #include "storage_proxy_stats.hh"
 #include "cache_temperature.hh"
 #include "mutation_query.hh"
+#include "schema.hh"
 
 namespace locator {
 
@@ -111,6 +112,27 @@ public:
     dht::partition_range_vector operator()(size_t n);
     bool empty() const;
 };
+
+/** Debugging helper: calculates counter delta from mutations first row. */
+inline int64_t calc_counter_mutations_delta(const mutation& m) {
+    int64_t delta = 666;
+
+    if (m.schema()->is_counter()) {
+        const auto* cdef = m.schema()->get_column_definition("entities");
+        if (cdef != nullptr) {
+            for (auto& cr : m.partition().clustered_rows()) {
+                const atomic_cell_or_collection& ac_o_c = cr.row().cells().cell_at(cdef->id);
+                auto acv = ac_o_c.as_atomic_cell(*cdef);
+                if (acv.is_live()) {
+                    delta = acv.counter_update_value();
+                    break;
+                }
+            }
+        }
+    }
+
+    return delta;
+}
 
 class storage_proxy : public seastar::async_sharded_service<storage_proxy>, public service::endpoint_lifecycle_subscriber /*implements StorageProxyMBean*/ {
 public:
@@ -298,9 +320,9 @@ private:
             uint64_t max_size, clock_type::time_point timeout);
 
     future<> mutate_counters_on_leader(std::vector<frozen_mutation_and_schema> mutations, db::consistency_level cl, clock_type::time_point timeout,
-                                       tracing::trace_state_ptr trace_state);
+                                       tracing::trace_state_ptr trace_state, bool origin_is_mutate_counters);
     future<> mutate_counter_on_leader_and_replicate(const schema_ptr& s, frozen_mutation m, db::consistency_level cl, clock_type::time_point timeout,
-                                                    tracing::trace_state_ptr trace_state);
+                                                    tracing::trace_state_ptr trace_state, bool origin_is_mutate_counters);
 
     gms::inet_address find_leader_for_counter_update(const mutation& m, db::consistency_level cl);
 

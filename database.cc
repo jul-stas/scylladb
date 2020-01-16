@@ -60,6 +60,7 @@
 #include <seastar/core/do_with.hh>
 #include "service/migration_manager.hh"
 #include "service/storage_service.hh"
+#include "service/storage_proxy.hh"
 #include "message/messaging_service.hh"
 #include "mutation_query.hh"
 #include <seastar/core/fstream.hh>
@@ -94,6 +95,9 @@ using namespace std::chrono_literals;
 using namespace db;
 
 logging::logger dblog("database");
+namespace service {
+extern logging::logger cntlogger;
+}
 
 namespace seastar {
 
@@ -1234,9 +1238,19 @@ std::ostream& operator<<(std::ostream& out, const database& db) {
 }
 
 future<mutation> database::do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema,
-                                                   db::timeout_clock::time_point timeout,tracing::trace_state_ptr trace_state) {
+                                                   db::timeout_clock::time_point timeout,tracing::trace_state_ptr trace_state,
+                                                   bool origin_is_mutate_counters) {
     auto m = fm.unfreeze(m_schema);
+    const auto delta_m = service::calc_counter_mutations_delta(m);
     m.upgrade(cf.schema());
+    // Test if schema upgrade changed counter deltas (it should not)
+    if (m_schema->ks_name() == "sync" && m_schema->cf_name() == "user_quota") {
+        const auto delta_upgraded = service::calc_counter_mutations_delta(m);
+        if (delta_m != delta_upgraded || llabs(delta_m) > 1 || llabs(delta_upgraded) > 1) {
+            service::cntlogger.error("do_apply_counter_update: origin_is_mutate_counters={}; delta_m={}; delta_upgraded={}",
+                    origin_is_mutate_counters ? 1 : 0, delta_m, delta_upgraded);
+        }
+    }
 
     // prepare partition slice
     query::column_id_vector static_columns;
@@ -1265,7 +1279,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
         std::move(regular_columns), { }, { }, cql_serialization_format::internal(), query::max_rows);
 
     return do_with(std::move(slice), std::move(m), std::vector<locked_cell>(),
-                   [this, &cf, timeout, trace_state = std::move(trace_state), op = cf.write_in_progress()] (const query::partition_slice& slice, mutation& m, std::vector<locked_cell>& locks) mutable {
+                   [this, &cf, timeout, trace_state = std::move(trace_state), op = cf.write_in_progress(), origin_is_mutate_counters] (const query::partition_slice& slice, mutation& m, std::vector<locked_cell>& locks) mutable {
         tracing::trace(trace_state, "Acquiring counter locks");
         return cf.lock_counter_cells(m, timeout).then([&, m_schema = cf.schema(), trace_state = std::move(trace_state), timeout, this] (std::vector<locked_cell> lcs) mutable {
             locks = std::move(lcs);
@@ -1276,11 +1290,11 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
 
             tracing::trace(trace_state, "Reading counter values from the CF");
             return counter_write_query(m_schema, cf.as_mutation_source(), m.decorated_key(), slice, trace_state)
-                    .then([this, &cf, &m, m_schema, timeout, trace_state] (auto mopt) {
+                    .then([this, &cf, &m, m_schema, timeout, trace_state, origin_is_mutate_counters] (auto mopt) {
                 // ...now, that we got existing state of all affected counter
                 // cells we can look for our shard in each of them, increment
                 // its clock and apply the delta.
-                transform_counter_updates_to_shards(m, mopt ? &*mopt : nullptr, cf.failed_counter_applies_to_memtable());
+                transform_counter_updates_to_shards(m, mopt ? &*mopt : nullptr, cf.failed_counter_applies_to_memtable(), origin_is_mutate_counters);
                 tracing::trace(trace_state, "Applying counter update");
                 return this->apply_with_commitlog(cf, m, timeout);
             }).then([&m] {
@@ -1415,7 +1429,8 @@ future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_
     }, timeout);
 }
 
-future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state) {
+future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state,
+        bool origin_is_mutate_counters) {
   return update_write_metrics(seastar::futurize_apply([&] {
     if (!s->is_synced()) {
         throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
@@ -1423,7 +1438,7 @@ future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutat
     }
     try {
         auto& cf = find_column_family(m.column_family_id());
-        return do_apply_counter_update(cf, m, s, timeout, std::move(trace_state));
+        return do_apply_counter_update(cf, m, s, timeout, std::move(trace_state), origin_is_mutate_counters);
     } catch (no_such_column_family&) {
         dblog.error("Attempting to mutate non-existent table {}", m.column_family_id());
         throw;

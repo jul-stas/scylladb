@@ -24,6 +24,10 @@
 #include "mutation.hh"
 #include "combine.hh"
 
+namespace service {
+extern logging::logger cntlogger;
+}
+
 counter_id counter_id::local()
 {
     return counter_id(service::get_local_storage_service().get_local_id());
@@ -216,19 +220,25 @@ std::optional<atomic_cell> counter_cell_view::difference(atomic_cell_view a, ato
 }
 
 
-void transform_counter_updates_to_shards(mutation& m, const mutation* current_state, uint64_t clock_offset) {
+void transform_counter_updates_to_shards(mutation& m, const mutation* current_state, uint64_t clock_offset,
+        bool origin_is_mutate_counters) {
     // FIXME: allow current_state to be frozen_mutation
 
-    auto transform_new_row_to_shards = [&s = *m.schema(), clock_offset] (column_kind kind, auto& cells) {
+    auto transform_new_row_to_shards = [&s = *m.schema(), clock_offset, origin_is_mutate_counters] (column_kind kind, auto& cells) {
         cells.for_each_cell([&] (column_id id, atomic_cell_or_collection& ac_o_c) {
             auto& cdef = s.column_at(kind, id);
             auto acv = ac_o_c.as_atomic_cell(cdef);
             if (!acv.is_live()) {
                 return; // continue -- we are in lambda
             }
-            auto delta = acv.counter_update_value();
+            const auto delta = acv.counter_update_value();
             auto cs = counter_shard(counter_id::local(), delta, clock_offset + 1);
             ac_o_c = counter_cell_builder::from_single_shard(acv.timestamp(), cs);
+            if (s.ks_name() == "sync" && s.cf_name() == "user_quota"
+                    && (llabs(cs.value()) > 100'000'000'000 || cs.value() != delta)) {
+                service::cntlogger.error("transform_new_row_to_shards: origin_is_mutate_counters={}; cs.value()={}; acv={}",
+                        origin_is_mutate_counters ? 1 : 0, cs.value(), acv);
+            }
         });
     };
 
@@ -242,7 +252,7 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
 
     clustering_key::less_compare cmp(*m.schema());
 
-    auto transform_row_to_shards = [&s = *m.schema(), clock_offset] (column_kind kind, auto& transformee, auto& state) {
+    auto transform_row_to_shards = [&s = *m.schema(), clock_offset, origin_is_mutate_counters] (column_kind kind, auto& transformee, auto& state) {
         std::deque<std::pair<column_id, counter_shard>> shards;
         state.for_each_cell([&] (column_id id, const atomic_cell_or_collection& ac_o_c) {
             auto& cdef = s.column_at(kind, id);
@@ -254,6 +264,10 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
             auto cs = ccv.local_shard();
             if (!cs) {
                 return; // continue
+            }
+            if (s.ks_name() == "sync" && s.cf_name() == "user_quota" && llabs(cs->value()) > 100'000'000'000) {
+                service::cntlogger.error("transform_row_to_shards #1: origin_is_mutate_counters={}, ccv={}; acv={}",
+                        origin_is_mutate_counters ? 1 : 0, ccv, acv);
             }
             shards.emplace_back(std::make_pair(id, counter_shard(*cs)));
           });
@@ -273,11 +287,27 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
 
             if (shards.empty() || shards.front().first > id) {
                 auto cs = counter_shard(counter_id::local(), delta, clock_offset + 1);
+                const auto cs_val = cs.value();
                 ac_o_c = counter_cell_builder::from_single_shard(acv.timestamp(), cs);
+                auto new_acv = ac_o_c.as_atomic_cell(cdef);
+                const auto new_aoc_val = new_acv.counter_update_value();
+                if (s.ks_name() == "sync" && s.cf_name() == "user_quota" &&
+                        (cs_val != new_aoc_val || llabs(new_aoc_val) > 100'000'000'000)) {
+                    service::cntlogger.error("transform_row_to_shards #2: origin_is_mutate_counters={}, cs_val={}, delta={}, new_aoc_val={}",
+                            origin_is_mutate_counters ? 1 : 0, cs_val, delta, new_aoc_val);
+                }
             } else {
                 auto& cs = shards.front().second;
+                const auto old_cs_val = cs.value();
                 cs.update(delta, clock_offset + 1);
                 ac_o_c = counter_cell_builder::from_single_shard(acv.timestamp(), cs);
+                auto new_acv = ac_o_c.as_atomic_cell(cdef);
+                const auto new_aoc_val = new_acv.counter_update_value();
+                if (s.ks_name() == "sync" && s.cf_name() == "user_quota" &&
+                        (old_cs_val + delta != new_aoc_val || llabs(new_aoc_val) > 100'000'000'000)) {
+                    service::cntlogger.error("transform_row_to_shards #3: origin_is_mutate_counters={}, old_cs_val={}, delta={}, new_aoc_val={}",
+                            origin_is_mutate_counters ? 1 : 0, old_cs_val, delta, new_aoc_val);
+                }
                 shards.pop_front();
             }
         });
