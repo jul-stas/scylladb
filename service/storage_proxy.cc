@@ -1254,7 +1254,7 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
         // Test if freeze-unfreeze changed counter deltas (it should not)
         if (m.schema()->ks_name() == "sync" && m.schema()->cf_name() == "user_quota") {
             const auto delta_fm = calc_counter_mutations_delta(fm.unfreeze(m.schema()));
-            if (delta_m != delta_fm || llabs(delta_m) > 1 || llabs(delta_fm) > 1) {
+            if (!compare(delta_m, delta_fm)) {
                 cntlogger.error("mutate_counters: delta_m={}; delta_fm={}", delta_m, delta_fm);
             }
         }

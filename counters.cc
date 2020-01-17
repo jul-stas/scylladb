@@ -223,6 +223,7 @@ std::optional<atomic_cell> counter_cell_view::difference(atomic_cell_view a, ato
 void transform_counter_updates_to_shards(mutation& m, const mutation* current_state, uint64_t clock_offset,
         bool origin_is_mutate_counters) {
     // FIXME: allow current_state to be frozen_mutation
+    thread_local bool error_already_printed = false;
 
     auto transform_new_row_to_shards = [&s = *m.schema(), clock_offset, origin_is_mutate_counters] (column_kind kind, auto& cells) {
         cells.for_each_cell([&] (column_id id, atomic_cell_or_collection& ac_o_c) {
@@ -234,8 +235,9 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
             const auto delta = acv.counter_update_value();
             auto cs = counter_shard(counter_id::local(), delta, clock_offset + 1);
             ac_o_c = counter_cell_builder::from_single_shard(acv.timestamp(), cs);
-            if (s.ks_name() == "sync" && s.cf_name() == "user_quota"
+            if (!error_already_printed && s.ks_name() == "sync" && s.cf_name() == "user_quota"
                     && (llabs(cs.value()) > 100'000'000'000 || cs.value() != delta)) {
+                error_already_printed = true;
                 service::cntlogger.error("transform_new_row_to_shards: origin_is_mutate_counters={}; cs.value()={}; acv={}",
                         origin_is_mutate_counters ? 1 : 0, cs.value(), acv);
             }
@@ -265,7 +267,8 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
             if (!cs) {
                 return; // continue
             }
-            if (s.ks_name() == "sync" && s.cf_name() == "user_quota" && llabs(cs->value()) > 100'000'000'000) {
+            if (!error_already_printed && s.ks_name() == "sync" && s.cf_name() == "user_quota" && llabs(cs->value()) > 100'000'000'000) {
+                error_already_printed = true;
                 service::cntlogger.error("transform_row_to_shards #1: origin_is_mutate_counters={}, ccv={}; acv={}",
                         origin_is_mutate_counters ? 1 : 0, ccv, acv);
             }
@@ -290,11 +293,16 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
                 const auto cs_val = cs.value();
                 ac_o_c = counter_cell_builder::from_single_shard(acv.timestamp(), cs);
                 auto new_acv = ac_o_c.as_atomic_cell(cdef);
-                const auto new_aoc_val = new_acv.counter_update_value();
-                if (s.ks_name() == "sync" && s.cf_name() == "user_quota" &&
-                        (cs_val != new_aoc_val || llabs(new_aoc_val) > 100'000'000'000)) {
-                    service::cntlogger.error("transform_row_to_shards #2: origin_is_mutate_counters={}, cs_val={}, delta={}, new_aoc_val={}",
-                            origin_is_mutate_counters ? 1 : 0, cs_val, delta, new_aoc_val);
+                std::optional<int64_t> new_aoc_val;
+                // We assume that the cell has 1 shard
+                counter_cell_view::with_linearized(new_acv, [&] (counter_cell_view ccv) {
+                    new_aoc_val = ccv.shards().begin()->value();
+                });
+                if (!error_already_printed && s.ks_name() == "sync" && s.cf_name() == "user_quota" &&
+                        new_aoc_val && (cs_val != *new_aoc_val || llabs(*new_aoc_val) > 100'000'000'000)) {
+                    error_already_printed = true;
+                    service::cntlogger.error("transform_row_to_shards #2: origin_is_mutate_counters={}, cs_val={}, delta={}, new_acv={}, *new_aoc_val={}",
+                            origin_is_mutate_counters ? 1 : 0, cs_val, delta, new_acv, new_aoc_val.value_or(666));
                 }
             } else {
                 auto& cs = shards.front().second;
@@ -302,11 +310,16 @@ void transform_counter_updates_to_shards(mutation& m, const mutation* current_st
                 cs.update(delta, clock_offset + 1);
                 ac_o_c = counter_cell_builder::from_single_shard(acv.timestamp(), cs);
                 auto new_acv = ac_o_c.as_atomic_cell(cdef);
-                const auto new_aoc_val = new_acv.counter_update_value();
-                if (s.ks_name() == "sync" && s.cf_name() == "user_quota" &&
-                        (old_cs_val + delta != new_aoc_val || llabs(new_aoc_val) > 100'000'000'000)) {
-                    service::cntlogger.error("transform_row_to_shards #3: origin_is_mutate_counters={}, old_cs_val={}, delta={}, new_aoc_val={}",
-                            origin_is_mutate_counters ? 1 : 0, old_cs_val, delta, new_aoc_val);
+                std::optional<int64_t> new_aoc_val;
+                // We assume that the cell has 1 shard
+                counter_cell_view::with_linearized(new_acv, [&] (counter_cell_view ccv) {
+                    new_aoc_val = ccv.shards().begin()->value();
+                });
+                if (!error_already_printed && s.ks_name() == "sync" && s.cf_name() == "user_quota" &&
+                        new_aoc_val && (old_cs_val + delta != *new_aoc_val || llabs(*new_aoc_val) > 100'000'000'000)) {
+                    error_already_printed = true;
+                    service::cntlogger.error("transform_row_to_shards #3: origin_is_mutate_counters={}, old_cs_val={}, delta={}, new_acv={}, *new_aoc_val={}",
+                            origin_is_mutate_counters ? 1 : 0, old_cs_val, delta, new_acv, new_aoc_val.value_or(666));
                 }
                 shards.pop_front();
             }

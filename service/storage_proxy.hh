@@ -113,9 +113,20 @@ public:
     bool empty() const;
 };
 
-/** Debugging helper: calculates counter delta from mutations first row. */
-inline int64_t calc_counter_mutations_delta(const mutation& m) {
-    int64_t delta = 666;
+inline bool compare(
+        const std::map<clustering_key, int64_t, clustering_key::less_compare>& m1,
+        const std::map<clustering_key, int64_t, clustering_key::less_compare>& m2) {
+    if (m1.size() != m2.size()) return false;
+    for (const auto& [k, v] : m1) {
+        if (!m2.count(k) || m2.at(k) != v) return false;
+    }
+    return true;
+}
+
+/** Debugging helper: calculates counter deltas from mutation's rows. */
+inline std::map<clustering_key, int64_t, clustering_key::less_compare> calc_counter_mutations_delta(const mutation& m) {
+    std::map<clustering_key, int64_t, clustering_key::less_compare> deltas(
+            clustering_key::less_compare(*m.schema()));
 
     if (m.schema()->is_counter()) {
         const auto* cdef = m.schema()->get_column_definition("entities");
@@ -124,14 +135,13 @@ inline int64_t calc_counter_mutations_delta(const mutation& m) {
                 const atomic_cell_or_collection& ac_o_c = cr.row().cells().cell_at(cdef->id);
                 auto acv = ac_o_c.as_atomic_cell(*cdef);
                 if (acv.is_live()) {
-                    delta = acv.counter_update_value();
-                    break;
+                    deltas[cr.key()] = acv.counter_update_value();
                 }
             }
         }
     }
 
-    return delta;
+    return deltas;
 }
 
 class storage_proxy : public seastar::async_sharded_service<storage_proxy>, public service::endpoint_lifecycle_subscriber /*implements StorageProxyMBean*/ {

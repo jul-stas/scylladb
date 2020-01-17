@@ -1246,7 +1246,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
     // Test if schema upgrade changed counter deltas (it should not)
     if (m_schema->ks_name() == "sync" && m_schema->cf_name() == "user_quota") {
         const auto delta_upgraded = service::calc_counter_mutations_delta(m);
-        if (delta_m != delta_upgraded || llabs(delta_m) > 1 || llabs(delta_upgraded) > 1) {
+        if (!service::compare(delta_m, delta_upgraded)) {
             service::cntlogger.error("do_apply_counter_update: origin_is_mutate_counters={}; delta_m={}; delta_upgraded={}",
                     origin_is_mutate_counters ? 1 : 0, delta_m, delta_upgraded);
         }
