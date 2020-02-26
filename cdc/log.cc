@@ -605,6 +605,7 @@ public:
                             pikey = set_pk_columns(m.key(), ts, tuuid, batch_no, res);
                             set_operation(*pikey, ts, operation::pre_image, res);
                             pirow = &utr;
+                            for (const auto& col : pirow->get_columns()) cdc_log.warn("=================== DEBUG ================= pirow has col: {}", col->name->to_string());
                             ++batch_no;
                             break;
                         }
@@ -629,6 +630,7 @@ public:
 
                 bytes_opt value;
                 std::optional<gc_clock::duration> ttl;
+                const operation cdc_op = r.row().deleted_at() ? operation::row_delete : operation::update;
 
                 auto process_cells = [&](const row& r, column_kind ckind) {
                     r.for_each_cell([&](column_id id, const atomic_cell_or_collection& cell) {
@@ -759,7 +761,7 @@ public:
                             res.set_cell(log_ck, *dst, atomic_cell::make_live(*dst->type, ts, *value, _cdc_ttl_opt));
                         }
 
-                        if (has_pirow) {
+                        if (has_pirow && cdc_op != operation::row_delete) {
                             value = cdef.is_atomic()
                                 ? pirow->get_blob(cdef.name_as_text())
                                 : visit(*cdef.type, make_visitor(
@@ -786,6 +788,16 @@ public:
                             res.set_cell(*pikey, *dst, atomic_cell::make_live(*dst->type, ts, *value, _cdc_ttl_opt));
                         }
                     });
+
+                    if (pirow && cdc_op == operation::row_delete) {
+                        for (const auto& col : pirow->get_columns()) {
+                            const auto& col_name = col->name->to_string();
+                            auto* dst = _log_schema->get_column_definition(to_bytes("_" + col_name));
+                            values[0] = data_type_for<column_op_native_type>()->decompose(data_value(static_cast<column_op_native_type>(column_op::set)));
+                            values[1] = pirow->get_blob(col_name);
+                            res.set_cell(*pikey, *dst, atomic_cell::make_live(*dst->type, ts, tuple_type_impl::build_value(values), _cdc_ttl_opt));
+                        }
+                    }
                 };
 
                 const auto& marker = r.row().marker();
@@ -852,6 +864,16 @@ public:
 
         query::column_id_vector static_columns, regular_columns;
 
+        auto sk = column_kind::static_column;
+        auto rk = column_kind::regular_column;
+
+        bool has_row_delete = false; // true if mutation has at least one row delete op.
+        for (const auto& crs : p.clustered_rows()) {
+            if (crs.row().deleted_at()) {
+                has_row_delete = true;
+                break;
+            }
+        }
         // TODO: this assumes all mutations touch the same set of columns. This might not be true, and we may need to do more horrible set operation here.
         if (!p.static_row().empty()) {
             p.static_row().get().for_each_cell([&] (column_id id, const atomic_cell_or_collection&) {
@@ -866,6 +888,30 @@ public:
                 regular_columns.emplace_back(id);
                 columns.emplace_back(&cdef);
             });
+        }
+
+        if (has_row_delete) {
+            // In case of row delete retrieve all columns
+            cdc_log.warn("=================== DEBUG ================= has_row_delete == true");
+            std::transform(m.schema()->static_columns().begin(), m.schema()->static_columns().end(), std::back_inserter(columns), [&] (const column_definition& c) {
+                cdc_log.warn("=================== DEBUG ================= adding static column to select: {}, in cdc log known as: {}", c.name_as_text(), _schema->column_at(column_kind::static_column, c.id).name_as_text());
+                static_columns.emplace_back(c.id);
+                return &_schema->column_at(column_kind::static_column, c.id);
+            });
+            std::transform(m.schema()->regular_columns().begin(), m.schema()->regular_columns().end(), std::back_inserter(columns), [&] (const column_definition& c) {
+                cdc_log.warn("=================== DEBUG ================= adding regular column to select: {}, in cdc log known as: {}", c.name_as_text(), _schema->column_at(column_kind::regular_column, c.id).name_as_text());
+                regular_columns.emplace_back(c.id);
+                return &_schema->column_at(column_kind::regular_column, c.id);
+            });
+        } else {
+            // Retrieve only affected columns
+            for (auto& [r, cids, kind] : { std::tie(p.static_row().get(), static_columns, sk), std::tie(p.clustered_rows().begin()->row().cells(), regular_columns, rk) }) {
+                r.for_each_cell([&](column_id id, const atomic_cell_or_collection&) {
+                    auto& cdef =_schema->column_at(kind, id);
+                    cids.emplace_back(id);
+                    columns.emplace_back(&cdef);
+                });
+            }
         }
         
         auto selection = cql3::selection::selection::for_columns(_schema, std::move(columns));
