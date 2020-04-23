@@ -1,0 +1,94 @@
+CREATE TABLE ks.tbl_cnt (pk int PRIMARY KEY, c counter);
+{
+	"status" : "ok"
+}
+
+-- insert some values
+UPDATE ks.tbl_cnt SET c = c+1 WHERE pk = 1;
+{
+	"status" : "ok"
+}
+UPDATE ks.tbl_cnt SET c = c+2 WHERE pk = 2;
+{
+	"status" : "ok"
+}
+UPDATE ks.tbl_cnt SET c = c+3 WHERE pk = 3;
+{
+	"status" : "ok"
+}
+UPDATE ks.tbl_cnt SET c = c+4 WHERE pk = 4;
+{
+	"status" : "ok"
+}
+
+-- test various filtering options on counter column
+SELECT pk, c FROM ks.tbl_cnt WHERE c < 3 ALLOW FILTERING;
+{
+	"rows" : 
+	[
+		{
+			"c" : "1",
+			"pk" : "1"
+		},
+		{
+			"c" : "2",
+			"pk" : "2"
+		}
+	]
+}
+SELECT pk, c FROM ks.tbl_cnt WHERE c <= 3 ALLOW FILTERING;
+{
+	"rows" : 
+	[
+		{
+			"c" : "1",
+			"pk" : "1"
+		},
+		{
+			"c" : "2",
+			"pk" : "2"
+		},
+		{
+			"c" : "3",
+			"pk" : "3"
+		}
+	]
+}
+SELECT pk, c FROM ks.tbl_cnt WHERE c > 2 AND pk = 4 ALLOW FILTERING;
+{
+	"rows" : 
+	[
+		{
+			"c" : "4",
+			"pk" : "4"
+		}
+	]
+}
+SELECT pk, c FROM ks.tbl_cnt WHERE c >= 3 and pk = 3 ALLOW FILTERING;
+{
+	"rows" : 
+	[
+		{
+			"c" : "3",
+			"pk" : "3"
+		}
+	]
+}
+SELECT pk, c FROM ks.tbl_cnt WHERE c in (2,3) ALLOW FILTERING;
+{
+	"rows" : 
+	[
+		{
+			"c" : "2",
+			"pk" : "2"
+		},
+		{
+			"c" : "3",
+			"pk" : "3"
+		}
+	]
+}
+SELECT pk, c FROM ks.tbl_cnt WHERE c = 0 ALLOW FILTERING;
+{
+	"rows" : null
+}
