@@ -965,6 +965,39 @@ public:
         }
     };
 
+    class cql_result_consumer final : public cql3::query_result_consumer {
+    private:
+        CqlResult _response;
+    public:
+        cql_result_consumer() {
+            _response.__set_type(CqlResultType::VOID);
+        }
+
+        void set_keyspace(const sstring& keyspace) override {
+            // Returning VOID message, so nothing to do
+        }
+
+        void set_result(cql3::result rs) override {
+            _response = to_thrift_result(rs);
+        }
+
+        void set_schema_change(shared_ptr<cql_transport::event::schema_change>& change) override {
+            // Returning VOID message, so nothing to do
+        }
+
+        void move_to_shard(unsigned shard_id) override {
+            throw TProtocolException(TProtocolException::TProtocolExceptionType::NOT_IMPLEMENTED, "Thrift does not support executing LWT statements");
+        }
+
+        void add_warning(const sstring& w) override {
+            throw std::runtime_error("Unimplemented add_warning");
+        }
+
+        CqlResult get_response() {
+            return std::move(_response);
+        }
+    };
+
     void execute_cql3_query(thrift_fn::function<void(CqlResult const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& query, const Compression::type compression, const ConsistencyLevel::type consistency) {
         with_exn_cob(std::move(exn_cob), [&] {
             if (compression != Compression::type::NONE) {
