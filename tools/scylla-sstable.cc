@@ -1069,6 +1069,11 @@ private:
         }
     }
 
+    template <typename... Types>
+    void visit(const std::variant<Types...>& val) {
+        std::visit([this] (const auto& elem) { visit(elem); }, val);
+    }
+
     template <typename Integer, typename T>
     void visit(const sstables::disk_array<Integer, T>& val) {
         _writer.StartArray();

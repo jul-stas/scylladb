@@ -219,10 +219,10 @@ distributed_loader::reshard(sharded<sstables::sstable_directory>& dir, sharded<r
     co_await run_resharding_jobs(dir, std::move(destinations), db, ks_name, table_name, std::move(creator));
 }
 
-future<int64_t>
+future<sstables::generation_type>
 highest_generation_seen(sharded<sstables::sstable_directory>& directory) {
-    return directory.map_reduce0(std::mem_fn(&sstables::sstable_directory::highest_generation_seen), int64_t(0), [] (int64_t a, int64_t b) {
-        return std::max(a, b);
+    return directory.map_reduce0(std::mem_fn(&sstables::sstable_directory::highest_generation_seen), sstables::generation_type{}, [] (sstables::generation_type a, sstables::generation_type b) {
+        return std::max<sstables::generation_type>(a, b);
     });
 }
 
@@ -263,7 +263,7 @@ distributed_loader::make_sstables_available(sstables::sstable_directory& dir, sh
 
     co_await dir.do_for_each_sstable([&table, datadir = std::move(datadir), &new_sstables] (sstables::shared_sstable sst) -> future<> {
         auto gen = table.calculate_generation_for_new_table();
-        dblog.trace("Loading {} into {}, new generation {}", sst->get_filename(), datadir.native(), gen);
+        dblog.trace("Loading {} into {}, new generation {}", sst->get_filename(), datadir.native(), sstables::to_string(gen));
         co_await sst->move_to_new_dir(datadir.native(), gen, true);
             // When loading an imported sst, set level to 0 because it may overlap with existing ssts on higher levels.
             sst->set_sstable_level(0);
@@ -316,7 +316,7 @@ distributed_loader::process_upload_dir(distributed<replica::database>& db, distr
         process_sstable_dir(directory).get();
 
         auto generation = highest_generation_seen(directory).get0();
-        auto shard_generation_base = generation / smp::count + 1;
+        auto shard_generation_base = sstables::calc_shard_num(generation);
 
         // We still want to do our best to keep the generation numbers shard-friendly.
         // Each destination shard will manage its own generation counter.

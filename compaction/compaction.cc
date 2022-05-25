@@ -1766,12 +1766,12 @@ get_fully_expired_sstables(const table_state& table_s, const std::vector<sstable
     for (auto& candidate : compacting) {
         auto gc_before = candidate->get_gc_before_for_fully_expire(compaction_time);
         clogger.debug("Checking if candidate of generation {} and max_deletion_time {} is expired, gc_before is {}",
-                    candidate->generation(), candidate->get_stats_metadata().max_local_deletion_time, gc_before);
+                    sstables::to_string(candidate->generation()), candidate->get_stats_metadata().max_local_deletion_time, gc_before);
         // A fully expired sstable which has an ancestor undeleted shouldn't be compacted because
         // expired data won't be purged because undeleted sstables are taken into account when
         // calculating max purgeable timestamp, and not doing it could lead to a compaction loop.
         if (candidate->get_max_local_deletion_time() < gc_before && !has_undeleted_ancestor(candidate)) {
-            clogger.debug("Adding candidate of generation {} to list of possibly expired sstables", candidate->generation());
+            clogger.debug("Adding candidate of generation {} to list of possibly expired sstables", to_string(candidate->generation()));
             candidates.insert(candidate);
         } else {
             min_timestamp = std::min(min_timestamp, candidate->get_stats_metadata().min_timestamp);

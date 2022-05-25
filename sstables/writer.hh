@@ -10,6 +10,7 @@
 
 #include <seastar/core/iostream.hh>
 #include <seastar/core/fstream.hh>
+#include "sstables/generation_type.hh"
 #include "types.hh"
 #include "checksum_utils.hh"
 #include "progress_monitor.hh"
@@ -608,9 +609,10 @@ future<> seal_summary(summary& s,
     std::optional<key>&& last_key,
     const index_sampling_state& state);
 
-void seal_statistics(sstable_version_types, statistics&, metadata_collector&, const std::set<int>& _compaction_ancestors,
+void seal_statistics(sstable_version_types, statistics&, metadata_collector&,
     const sstring partitioner, double bloom_filter_fp_chance, schema_ptr,
-    const dht::decorated_key& first_key, const dht::decorated_key& last_key, const encoding_stats& enc_stats = {});
+    const dht::decorated_key& first_key, const dht::decorated_key& last_key,
+    const encoding_stats& enc_stats = {}, const std::set<int>& compaction_ancestors = {});
 
 void write(sstable_version_types, file_writer&, const utils::estimated_histogram&);
 void write(sstable_version_types, file_writer&, const utils::streaming_histogram&);

@@ -919,7 +919,7 @@ void sstable::write_toc(const io_priority_class& pc) {
         // the generation of a sstable that exists.
         w.close();
         remove_file(file_path).get();
-        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", _generation, _schema->ks_name(), _schema->cf_name()));
+        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", to_string(_generation), _schema->ks_name(), _schema->cf_name()));
     }
 
     for (auto&& key : _recognized_components) {
@@ -955,7 +955,7 @@ future<> sstable::seal_sstable() {
         _marked_for_deletion = mark_for_deletion::none;
     }
     // If this point was reached, sstable should be safe in disk.
-    sstlog.debug("SSTable with generation {} of {}.{} was sealed successfully.", _generation, _schema->ks_name(), _schema->cf_name());
+    sstlog.debug("SSTable with generation {} of {}.{} was sealed successfully.", to_string(_generation), _schema->ks_name(), _schema->cf_name());
 }
 
 void sstable::write_crc(const checksum& c) {
@@ -1509,9 +1509,10 @@ create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key,
 
 // In the beginning of the statistics file, there is a disk_hash used to
 // map each metadata type to its correspondent position in the file.
-void seal_statistics(sstable_version_types v, statistics& s, metadata_collector& collector, const std::set<int>& _compaction_ancestors,
+void seal_statistics(sstable_version_types v, statistics& s, metadata_collector& collector,
         const sstring partitioner, double bloom_filter_fp_chance, schema_ptr schema,
-        const dht::decorated_key& first_key, const dht::decorated_key& last_key, const encoding_stats& enc_stats) {
+        const dht::decorated_key& first_key, const dht::decorated_key& last_key,
+        const encoding_stats& enc_stats, const std::set<int>& compaction_ancestors) {
     validation_metadata validation;
     compaction_metadata compaction;
     stats_metadata stats;
@@ -1521,8 +1522,8 @@ void seal_statistics(sstable_version_types v, statistics& s, metadata_collector&
     s.contents[metadata_type::Validation] = std::make_unique<validation_metadata>(std::move(validation));
 
     collector.construct_compaction(compaction);
-    if (v < sstable_version_types::mc && !_compaction_ancestors.empty()) {
-        compaction.ancestors.elements = utils::chunked_vector<uint32_t>(_compaction_ancestors.begin(), _compaction_ancestors.end());
+    if (v < sstable_version_types::mc && !compaction_ancestors.empty()) {
+        compaction.ancestors.elements = utils::chunked_vector<uint32_t>(compaction_ancestors.begin(), compaction_ancestors.end());
     }
     s.contents[metadata_type::Compaction] = std::make_unique<compaction_metadata>(std::move(compaction));
 
@@ -1882,7 +1883,7 @@ bool sstable::is_uploaded() const noexcept {
 sstring sstable::component_basename(const sstring& ks, const sstring& cf, version_types version, generation_type generation,
                                     format_types format, sstring component) {
     sstring v = _version_string.at(version);
-    sstring g = to_sstring(generation);
+    sstring g = to_string(generation);
     sstring f = _format_string.at(format);
     switch (version) {
     case sstable::version_types::ka:
@@ -2032,7 +2033,7 @@ future<> sstable::check_create_links_replay(const sstring& dst_dir, generation_t
 /// \param generation - the generation of the destination sstable
 /// \param mark_for_removal - mark the sstable for removal after linking it to the destination dir
 future<> sstable::create_links_common(const sstring& dir, generation_type generation, bool mark_for_removal) const {
-    sstlog.trace("create_links: {} -> {} generation={} mark_for_removal={}", get_filename(), dir, generation, mark_for_removal);
+    sstlog.trace("create_links: {} -> {} generation={} mark_for_removal={}", get_filename(), dir, to_string(generation), mark_for_removal);
     return do_with(dir, all_components(), [this, generation, mark_for_removal] (const sstring& dir, auto& comps) {
         return check_create_links_replay(dir, generation, comps).then([this, &dir, generation, &comps, mark_for_removal] {
             // TemporaryTOC is always first, TOC is always last
@@ -2065,7 +2066,7 @@ future<> sstable::create_links_common(const sstring& dir, generation_type genera
         }).then([this, &dir] {
             return sstable_write_io_check(sync_directory, dir);
         }).then([this, &dir, generation] {
-            sstlog.trace("create_links: {} -> {} generation={}: done", get_filename(), dir, generation);
+            sstlog.trace("create_links: {} -> {} generation={}: done", get_filename(), dir, to_string(generation));
         });
     });
 }
@@ -2079,7 +2080,7 @@ future<> sstable::create_links_and_mark_for_removal(const sstring& dir, generati
 }
 
 future<> sstable::set_generation(generation_type new_generation) {
-    sstlog.debug("Setting generation for {} to generation={}", get_filename(), new_generation);
+    sstlog.debug("Setting generation for {} to generation={}", get_filename(), to_string(new_generation));
     return create_links(_dir, new_generation).then([this] {
         return remove_file(filename(component_type::TOC)).then([this] {
             return sstable_write_io_check(sync_directory, _dir);
@@ -2101,7 +2102,7 @@ future<> sstable::set_generation(generation_type new_generation) {
 future<> sstable::move_to_new_dir(sstring new_dir, generation_type new_generation, bool do_sync_dirs) {
     sstring old_dir = get_dir();
     sstlog.debug("Moving {} old_generation={} to {} new_generation={} do_sync_dirs={}",
-            get_filename(), old_dir, _generation, new_dir, new_generation, do_sync_dirs);
+            get_filename(), old_dir, to_string(_generation), new_dir, to_string(new_generation), do_sync_dirs);
     co_await create_links_and_mark_for_removal(new_dir, new_generation);
     _dir = new_dir;
     generation_type old_generation = std::exchange(_generation, new_generation);
@@ -2244,7 +2245,7 @@ static entry_descriptor make_entry_descriptor(sstring sstdir, sstring fname, sst
     } else {
         throw malformed_sstable_exception(seastar::format("invalid version for file {}. Name doesn't match any known version.", fname));
     }
-    return entry_descriptor(sstdir, ks, cf, boost::lexical_cast<unsigned long>(generation), version, sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
+    return entry_descriptor(sstdir, ks, cf, generation_from_string(generation), version, sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
 }
 
 entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname) {
@@ -2552,7 +2553,7 @@ void sstable::set_sstable_level(uint32_t new_level) {
         throw std::runtime_error("Statistics is malformed");
     }
     stats_metadata& s = *static_cast<stats_metadata *>(p.get());
-    sstlog.debug("set level of {} with generation {} from {} to {}", get_filename(), _generation, s.sstable_level, new_level);
+    sstlog.debug("set level of {} with generation {} from {} to {}", get_filename(), to_string(_generation), s.sstable_level, new_level);
     s.sstable_level = new_level;
 }
 
@@ -2964,7 +2965,7 @@ delete_atomically(std::vector<shared_sstable> ssts) {
         }
 
         sstring pending_delete_dir = sstdir + "/" + sstable::pending_delete_dir_basename();
-        sstring pending_delete_log = format("{}/sstables-{}-{}.log", pending_delete_dir, gen_tracker.min(), gen_tracker.max());
+        sstring pending_delete_log = format("{}/sstables-{}-{}.log", pending_delete_dir, to_string(gen_tracker.min()), to_string(gen_tracker.max()));
         sstring tmp_pending_delete_log = pending_delete_log + ".tmp";
         sstlog.trace("Writing {}", tmp_pending_delete_log);
         try {

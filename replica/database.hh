@@ -426,7 +426,7 @@ private:
     std::vector<sstables::shared_sstable> _sstables_compacted_but_not_deleted;
     // sstables that should not be compacted (e.g. because they need to be used
     // to generate view updates later)
-    std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_staging;
+    std::unordered_map<sstables::generation_type, sstables::shared_sstable> _sstables_staging;
     // Control background fibers waiting for sstables to be deleted
     seastar::gate _sstable_deletion_gate;
     // This semaphore ensures that an operation like snapshot won't have its selected
@@ -436,7 +436,7 @@ private:
     // Ensures that concurrent updates to sstable set will work correctly
     seastar::named_semaphore _sstable_set_mutation_sem = {1, named_semaphore_exception_factory{"sstable set mutation"}};
     mutable row_cache _cache; // Cache covers only sstables.
-    std::optional<int64_t> _sstable_generation = {};
+    std::optional<sstables::generation_type> _sstable_generation = {};
 
     db::replay_position _highest_rp;
     db::replay_position _flush_rp;
@@ -564,24 +564,24 @@ private:
     struct merge_comparator;
 
     // update the sstable generation, making sure that new new sstables don't overwrite this one.
-    void update_sstables_known_generation(unsigned generation) {
+    void update_sstables_known_generation(sstables::generation_type generation) {
         if (!_sstable_generation) {
             _sstable_generation = 1;
         }
-        _sstable_generation = std::max<uint64_t>(*_sstable_generation, generation /  smp::count + 1);
+        _sstable_generation = std::max<sstables::generation_type>(*_sstable_generation, generation);
     }
 
     sstables::generation_type calculate_generation_for_new_table() {
         assert(_sstable_generation);
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
-        return (*_sstable_generation)++ * smp::count + this_shard_id();
+        return sstables::increment(*_sstable_generation);
     }
 
     // inverse of calculate_generation_for_new_table(), used to determine which
     // shard a sstable should be opened at.
-    static int64_t calculate_shard_from_sstable_generation(int64_t sstable_generation) {
-        return sstable_generation % smp::count;
+    static int64_t calculate_shard_from_sstable_generation(sstables::generation_type sstable_generation) {
+        return sstables::calc_shard_num(sstable_generation);
     }
 public:
     // This will update sstable lists on behalf of off-strategy compaction, where

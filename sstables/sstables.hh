@@ -281,11 +281,11 @@ public:
         return _marked_for_deletion == mark_for_deletion::marked;
     }
 
-    const std::set<int>& compaction_ancestors() const {
+    const std::set<generation_type>& compaction_ancestors() const {
         return _compaction_ancestors;
     }
 
-    void add_ancestor(generation_type generation) {
+    void add_ancestor(const generation_type& generation) {
         _compaction_ancestors.insert(generation);
     }
 
@@ -360,11 +360,11 @@ public:
         return filename(component_type::TOC);
     }
 
-    static sstring sst_dir_basename(generation_type gen) {
-        return fmt::format("{}.sstable", gen);
+    static sstring sst_dir_basename(const generation_type& gen) {
+        return fmt::format("{}.sstable", to_string(gen));
     }
 
-    static sstring temp_sst_dir(const sstring& dir, generation_type gen) {
+    static sstring temp_sst_dir(const sstring& dir, const generation_type& gen) {
         return dir + "/" + sst_dir_basename(gen);
     }
 
@@ -481,7 +481,7 @@ private:
     std::optional<open_flags> _open_mode;
     // _compaction_ancestors track which sstable generations were used to generate this sstable.
     // it is then used to generate the ancestors metadata in the statistics or scylla components.
-    std::set<int> _compaction_ancestors;
+    std::set<generation_type> _compaction_ancestors;
     file _index_file;
     seastar::shared_ptr<cached_file> _cached_index_file;
     file _data_file;

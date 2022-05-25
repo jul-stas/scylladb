@@ -58,7 +58,7 @@ std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run) {
     });
     os << "  Fragments = {\n";
     for (auto& frag : frags) {
-        os << format("    {}={}:{}\n", frag->generation(), frag->get_first_decorated_key().token(), frag->get_last_decorated_key().token());
+        os << format("    {}={}:{}\n", to_string(frag->generation()), frag->get_first_decorated_key().token(), frag->get_last_decorated_key().token());
     }
     os << "  }\n}\n";
     return os;
@@ -623,7 +623,7 @@ class incremental_reader_selector : public reader_selector {
     lw_shared_ptr<const sstable_set> _sstables;
     tracing::trace_state_ptr _trace_state;
     std::optional<sstable_set::incremental_selector> _selector;
-    std::unordered_set<int64_t> _read_sstable_gens;
+    std::unordered_set<generation_type> _read_sstable_gens;
     sstable_reader_factory_type _fn;
 
     flat_mutation_reader_v2 create_reader(shared_sstable sst) {
